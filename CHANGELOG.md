@@ -23,6 +23,8 @@ Per Keep a Changelog there are 6 main categories of changes:
 
 ## Unreleased
 
+- Fixed a panic when parsing a DFD with a texel block dimension byte of 255: it now returns `ParseError::InvalidTexelBlockDimension`.
+
 ## v0.5.0
 
 Released 2026-04-19
