@@ -1,7 +1,6 @@
 # Fails when this branch is behind the repository the fork was forked from: when upstream's
-# default branch has commits the branch doesn't contain, or upstream has tagged a release newer
-# than the newest one the branch contains. The job summary lists what is missing. Merging
-# upstream's default branch into the branch (never rebasing it: it is published) clears both.
+# default branch has commits the branch doesn't contain, which the job summary lists. Merging
+# upstream's default branch into the branch (never rebasing it: it is published) clears it.
 name: Upstream
 
 on:
@@ -37,48 +36,31 @@ jobs:
           # Commits and trees only: comparing histories needs no file contents, and a history
           # can hold hundreds of megabytes of binaries.
           git fetch --quiet --filter=blob:none --no-tags upstream \
-            "+refs/heads/$default_branch:refs/remotes/upstream/$default_branch" "+refs/tags/*:refs/tags/*"
+            "+refs/heads/$default_branch:refs/remotes/upstream/$default_branch"
           # The commit the run is for, so a push in between can't change what is checked.
           git fetch --quiet --filter=blob:none --no-tags fork "$GITHUB_SHA"
-
-          # Sorted by their numbers, a leading `v` aside.
-          release_tags() {
-            { grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sed -E 's/^(v?)(.*)$/\2 \1\2/' \
-              | sort --version-sort --key=1,1 | cut --delimiter=' ' --fields=2
-          }
-          latest_release=$(git tag --list | release_tags | tail -n 1)
-          base_release=$(git tag --list --merged "$GITHUB_SHA" | release_tags | tail -n 1)
-          if [[ -z "$base_release" ]]; then
-            echo "::error::$GITHUB_REF_NAME contains no release of $upstream"
-            exit 1
-          fi
 
           git log --format='%H %s' "upstream/$default_branch" "^$GITHUB_SHA" > "$RUNNER_TEMP/missing"
           mapfile -t missing < "$RUNNER_TEMP/missing"
 
-          behind=false
           {
             echo "## \`$GITHUB_REF_NAME\` compared with $upstream"
             echo
-            echo "Contains release \`$base_release\`; upstream's latest release is \`$latest_release\`."
-            if [[ "$latest_release" != "$base_release" ]]; then
-              behind=true
-              echo
-              echo "**Upstream has a newer release:** [\`$latest_release\`](https://github.com/$upstream/tree/$latest_release)."
-            fi
-            echo
-            if ((${#missing[@]} > 0)); then
-              behind=true
-              echo "**${#missing[@]} commits of upstream's \`$default_branch\` aren't on the branch:**"
+            if ((${#missing[@]} == 0)); then
+              echo "The branch contains every commit of upstream's \`$default_branch\`."
+            else
+              if ((${#missing[@]} == 1)); then
+                echo "**1 commit of upstream's \`$default_branch\` isn't on the branch:**"
+              else
+                echo "**${#missing[@]} commits of upstream's \`$default_branch\` aren't on the branch:**"
+              fi
               echo
               for commit in "${missing[@]}"; do
                 echo "- [\`${commit:0:7}\`](https://github.com/$upstream/commit/${commit%% *}) ${commit#* }"
               done
-            else
-              echo "The branch contains every commit of upstream's \`$default_branch\`."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$behind" == true ]]; then
+          if ((${#missing[@]} > 0)); then
             echo "::error::$GITHUB_REF_NAME is behind $upstream (see the job summary)"
             exit 1
           fi
