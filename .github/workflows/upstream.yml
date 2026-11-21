@@ -11,6 +11,7 @@ on:
     - cron: '23 4 * * *'
   workflow_dispatch:
   push:
+    branches: ['**']
     paths: [.github/workflows/upstream.yml]
 
 permissions:
@@ -21,7 +22,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      FORK_BRANCH: ${{ github.ref_name }}
       REVIEWED_UPSTREAM_COMMIT: d18d65fb50e7fa26d5d853fa38188e4deaae2c51
       GH_TOKEN: ${{ github.token }}
     defaults:
@@ -37,12 +37,12 @@ jobs:
           git init --quiet
           git remote add upstream "https://github.com/$upstream.git"
           git remote add fork "https://github.com/$GITHUB_REPOSITORY.git"
+          # The commit the run is for, so a push in between can't change what is checked.
           # Commits and trees only: telling which files changed needs no file contents, and a
           # history can hold hundreds of megabytes of binaries.
           git fetch --quiet --filter=blob:none --no-tags upstream \
             "+refs/heads/$default_branch:refs/remotes/upstream/$default_branch" "+refs/tags/*:refs/tags/*"
-          git fetch --quiet --filter=blob:none --no-tags fork \
-            "+refs/heads/$FORK_BRANCH:refs/remotes/fork/$FORK_BRANCH"
+          git fetch --quiet --filter=blob:none --no-tags fork "$GITHUB_SHA"
 
           # Sorted by their numbers, a leading `v` aside.
           release_tags() {
@@ -50,9 +50,9 @@ jobs:
               | sort --version-sort --key=1,1 | cut --delimiter=' ' --fields=2
           }
           latest_release=$(git tag --list | release_tags | tail -n 1)
-          base_release=$(git tag --list --merged "fork/$FORK_BRANCH" | release_tags | tail -n 1)
+          base_release=$(git tag --list --merged "$GITHUB_SHA" | release_tags | tail -n 1)
           if [[ -z "$base_release" ]]; then
-            echo "::error::$FORK_BRANCH contains no release of $upstream"
+            echo "::error::$GITHUB_REF_NAME contains no release of $upstream"
             exit 1
           fi
           if ! git merge-base --is-ancestor "$REVIEWED_UPSTREAM_COMMIT" "upstream/$default_branch"; then
@@ -60,19 +60,19 @@ jobs:
             exit 1
           fi
 
-          git diff -z --no-renames --name-only "$base_release" "fork/$FORK_BRANCH" -- . ':(exclude).github' \
+          git diff -z --no-renames --name-only "$base_release" "$GITHUB_SHA" -- . ':(exclude).github' \
             > "$RUNNER_TEMP/carried"
           mapfile -d '' -t carried < "$RUNNER_TEMP/carried"
           : > "$RUNNER_TEMP/commits"
           if ((${#carried[@]} > 0)); then
             git --literal-pathspecs log --format='%H %s' "$REVIEWED_UPSTREAM_COMMIT..upstream/$default_branch" \
-              "^fork/$FORK_BRANCH" -- "${carried[@]}" > "$RUNNER_TEMP/commits"
+              "^$GITHUB_SHA" -- "${carried[@]}" > "$RUNNER_TEMP/commits"
           fi
           mapfile -t commits < "$RUNNER_TEMP/commits"
 
           behind=false
           {
-            echo "## \`$FORK_BRANCH\` compared with $upstream"
+            echo "## \`$GITHUB_REF_NAME\` compared with $upstream"
             echo
             echo "Based on release \`$base_release\`; upstream's latest release is \`$latest_release\`."
             if [[ "$latest_release" != "$base_release" ]]; then
@@ -93,6 +93,6 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           if [[ "$behind" == true ]]; then
-            echo "::error::$FORK_BRANCH is behind $upstream (see the job summary)"
+            echo "::error::$GITHUB_REF_NAME is behind $upstream (see the job summary)"
             exit 1
           fi
