@@ -1,0 +1,98 @@
+# Fails when this branch is behind the repository the fork was forked from: when upstream has
+# tagged a release newer than the one the branch is based on, or when upstream's default branch
+# has commits, after the last one reviewed and not on the branch, that touch the files the branch
+# changes (its CI configuration aside). The job summary lists what is new.
+#
+# Once the new commits are reviewed, REVIEWED_UPSTREAM_COMMIT moves to the newest of them.
+name: Upstream
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+  push:
+    paths: [.github/workflows/upstream.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  upstream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FORK_BRANCH: ${{ github.ref_name }}
+      REVIEWED_UPSTREAM_COMMIT: d18d65fb50e7fa26d5d853fa38188e4deaae2c51
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Compare the branch with upstream
+        run: |
+          set -euo pipefail
+          parent=$(gh api "repos/$GITHUB_REPOSITORY" --jq '.parent // error("not a fork") | "\(.full_name) \(.default_branch)"')
+          read -r upstream default_branch <<< "$parent"
+
+          git init --quiet
+          git remote add upstream "https://github.com/$upstream.git"
+          git remote add fork "https://github.com/$GITHUB_REPOSITORY.git"
+          # Commits and trees only: telling which files changed needs no file contents, and a
+          # history can hold hundreds of megabytes of binaries.
+          git fetch --quiet --filter=blob:none --no-tags upstream \
+            "+refs/heads/$default_branch:refs/remotes/upstream/$default_branch" "+refs/tags/*:refs/tags/*"
+          git fetch --quiet --filter=blob:none --no-tags fork \
+            "+refs/heads/$FORK_BRANCH:refs/remotes/fork/$FORK_BRANCH"
+
+          # Sorted by their numbers, a leading `v` aside.
+          release_tags() {
+            { grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sed -E 's/^(v?)(.*)$/\2 \1\2/' \
+              | sort --version-sort --key=1,1 | cut --delimiter=' ' --fields=2
+          }
+          latest_release=$(git tag --list | release_tags | tail -n 1)
+          base_release=$(git tag --list --merged "fork/$FORK_BRANCH" | release_tags | tail -n 1)
+          if [[ -z "$base_release" ]]; then
+            echo "::error::$FORK_BRANCH contains no release of $upstream"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$REVIEWED_UPSTREAM_COMMIT" "upstream/$default_branch"; then
+            echo "::error::REVIEWED_UPSTREAM_COMMIT isn't on $upstream's $default_branch"
+            exit 1
+          fi
+
+          git diff -z --no-renames --name-only "$base_release" "fork/$FORK_BRANCH" -- . ':(exclude).github' \
+            > "$RUNNER_TEMP/carried"
+          mapfile -d '' -t carried < "$RUNNER_TEMP/carried"
+          : > "$RUNNER_TEMP/commits"
+          if ((${#carried[@]} > 0)); then
+            git --literal-pathspecs log --format='%H %s' "$REVIEWED_UPSTREAM_COMMIT..upstream/$default_branch" \
+              "^fork/$FORK_BRANCH" -- "${carried[@]}" > "$RUNNER_TEMP/commits"
+          fi
+          mapfile -t commits < "$RUNNER_TEMP/commits"
+
+          behind=false
+          {
+            echo "## \`$FORK_BRANCH\` compared with $upstream"
+            echo
+            echo "Based on release \`$base_release\`; upstream's latest release is \`$latest_release\`."
+            if [[ "$latest_release" != "$base_release" ]]; then
+              behind=true
+              echo
+              echo "**Upstream has a newer release:** [\`$latest_release\`](https://github.com/$upstream/tree/$latest_release)."
+            fi
+            echo
+            if ((${#commits[@]} > 0)); then
+              behind=true
+              echo "**Commits on upstream's \`$default_branch\` after \`${REVIEWED_UPSTREAM_COMMIT:0:7}\` that touch files the branch changes:**"
+              echo
+              for commit in "${commits[@]}"; do
+                echo "- [\`${commit:0:7}\`](https://github.com/$upstream/commit/${commit%% *}) ${commit#* }"
+              done
+            else
+              echo "No commit on upstream's \`$default_branch\` after \`${REVIEWED_UPSTREAM_COMMIT:0:7}\` touches the ${#carried[@]} files the branch changes."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$behind" == true ]]; then
+            echo "::error::$FORK_BRANCH is behind $upstream (see the job summary)"
+            exit 1
+          fi
