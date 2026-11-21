@@ -10,6 +10,7 @@ on:
     - cron: '41 4 * * *'
   workflow_dispatch:
   push:
+    branches: ['**']
     paths: [.github/workflows/dependencies.yml, .github/deny.toml]
 
 permissions:
